@@ -117,7 +117,8 @@ function buildSnapshot(d, user) {
   }));
 
   const nomList = nominations.map((n) => ({
-    id: n.id, labId: n.lab_id, no: n.student_id, type: n.type, rank: n.rank, round: n.round, status: n.status
+    id: n.id, labId: n.lab_id, no: n.student_id, type: n.type, rank: n.rank, round: n.round,
+    status: n.status, deadline: n.deadline || null
   }));
 
   const confMap = {};
@@ -195,6 +196,10 @@ function buildSnapshot(d, user) {
 }
 
 /* ---------------- 登录 ---------------- */
+const attempts = new Map();
+const MAX_FAILS = 5;
+const LOCK_MS = 10 * 60e3;
+
 function login(body, res) {
   const d = open();
   const role = String(body.role || '');
@@ -204,13 +209,27 @@ function login(body, res) {
   if (!id) fail(400, '请输入账号');
   if (password.length < 6) fail(400, '密码至少 6 位');
 
+  const key = role + ':' + id;
+  const rec = attempts.get(key);
+  const t = Date.now();
+  if (rec && rec.until > t) {
+    fail(429, '尝试次数过多，请 ' + Math.ceil((rec.until - t) / 60000) + ' 分钟后再试');
+  }
+  if (rec && rec.until && rec.until <= t) attempts.delete(key);
+
   const u = d.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(id, role);
-  if (!u) fail(404, '账号不存在，请检查后重试');
-  const hash = hashPassword(password, u.salt);
-  if (hash !== u.password_hash) fail(401, '密码不正确');
+  const ok = !!u && hashPassword(password, u.salt) === u.password_hash;
+  if (!ok) {
+    const cur = attempts.get(key) || { count: 0, until: 0 };
+    cur.count += 1;
+    if (cur.count >= MAX_FAILS) { cur.until = t + LOCK_MS; cur.count = 0; }
+    attempts.set(key, cur);
+    if (cur.until > t) fail(429, '尝试次数过多，请 10 分钟后再试');
+    fail(u ? 401 : 404, u ? '密码不正确' : '账号不存在，请检查后重试');
+  }
+  attempts.delete(key);
 
   const token = crypto.randomBytes(24).toString('hex');
-  const t = Date.now();
   d.prepare('INSERT INTO sessions (token, user_id, role, created_at, expires_at) VALUES (?,?,?,?,?)')
     .run(token, u.id, u.role, t, t + SESSION_MS);
   d.prepare('DELETE FROM sessions WHERE expires_at < ?').run(t);
@@ -362,8 +381,10 @@ function removeNomination(d, user, id) {
   const rest = d.prepare('SELECT id FROM nominations WHERE lab_id = ? AND type = ? AND status IS NULL ORDER BY rank ASC')
     .all(nom.lab_id, nom.type);
   rest.forEach((r, i) => d.prepare('UPDATE nominations SET rank = ? WHERE id = ?').run(i + 1, r.id));
+  const filled = nom.type === 'accept' ? rules.promote(d, nom.lab_id) : 0;
   const stu = d.prepare('SELECT name FROM users WHERE id = ?').get(nom.student_id);
-  rules.audit(d, user.name, user.role, '调整名单', '从「' + lab.name + '」移除 ' + (stu ? stu.name : nom.student_id));
+  rules.audit(d, user.name, user.role, '调整名单', '从「' + lab.name + '」移除 ' + (stu ? stu.name : nom.student_id) +
+    (filled ? '，递补 ' + filled + ' 人' : ''));
 }
 
 function updateQuota(d, user, labId, body) {
@@ -375,6 +396,7 @@ function updateQuota(d, user, labId, body) {
   const taken = rules.takenCount(d, labId);
   if (quota < taken) fail(409, '名额不能低于当前已占用人数 ' + taken);
   d.prepare('UPDATE labs SET quota = ? WHERE id = ?').run(quota, labId);
+  const filled = rules.promote(d, labId);
   rules.audit(d, user.name, 'admin', '调整名额', '「' + lab.name + '」名额调整为 ' + quota);
 }
 
@@ -504,6 +526,73 @@ route('POST', '/api/demo/reset', (ctx) => {
   resetDemo();
   return { ok: true };
 });
+route('POST', '/api/interviews/:id/unlock', withSnapshot((d, ctx) => unlockInterview(d, ctx.user, ctx.params.id)));
+route('GET', '/api/export/:type', (ctx) => {
+  const d = open();
+  return exportCsv(d, ctx.user, String(ctx.params.type));
+});
+
+/* ---------------- 导出与解锁 ---------------- */
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+const csvOf = (rows) => rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+const csvDate = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10).replace(/-/g, '');
+
+function exportCsv(d, user, type) {
+  if (user.role !== 'admin') fail(403, '仅学院管理员可导出');
+  let rows;
+  if (type === 'labs') {
+    rows = [['实训室', '方向', '导师', '名额', '报名', '占用', '剩余']].concat(
+      d.prepare(`SELECT l.name, l.direction, l.teacher_name, l.quota, v.taken,
+        (SELECT COUNT(DISTINCT student_id) FROM application_labs WHERE lab_id = l.id) AS applicants
+        FROM labs l JOIN v_lab_capacity v ON v.lab_id = l.id ORDER BY l.id`).all()
+        .map((r) => [r.name, r.direction, r.teacher_name, r.quota, r.applicants, r.taken, Math.max(0, r.quota - r.taken)])
+    );
+  } else if (type === 'students') {
+    rows = [['学号', '姓名', '班级', '手机', '邮箱', '意向数', '面试数', '录取去向']].concat(
+      d.prepare(`SELECT u.id, u.name, u.cls, u.phone, u.email,
+        (SELECT COUNT(*) FROM application_labs WHERE student_id = u.id) AS apps,
+        (SELECT COUNT(*) FROM interviews WHERE student_id = u.id AND status = 'done') AS ivs,
+        (SELECT l.name FROM confirmations c JOIN labs l ON l.id = c.lab_id WHERE c.student_id = u.id) AS lab
+        FROM users u WHERE u.role = 'student' ORDER BY u.id`).all()
+        .map((r) => [r.id, r.name, r.cls, r.phone, r.email, r.apps, r.ivs, r.lab || '未录取'])
+    );
+  } else if (type === 'admissions') {
+    rows = [['学号', '姓名', '班级', '实训室', '方向', '录取方式', '确认时间']].concat(
+      d.prepare(`SELECT c.student_id, u.name, u.cls, l.name AS lab, l.direction, c.source, c.at
+        FROM confirmations c JOIN users u ON u.id = c.student_id JOIN labs l ON l.id = c.lab_id
+        ORDER BY l.name, u.name`).all()
+        .map((r) => [r.student_id, r.name, r.cls, r.lab, r.direction, r.source, new Date(r.at).toLocaleString('zh-CN', { hour12: false })])
+    );
+  } else if (type === 'publicity') {
+    rows = [['学号（脱敏）', '姓名', '实训室', '方向', '录取方式', '确认时间']].concat(
+      d.prepare(`SELECT c.student_id, u.name, l.name AS lab, l.direction, c.source, c.at
+        FROM confirmations c JOIN users u ON u.id = c.student_id JOIN labs l ON l.id = c.lab_id
+        ORDER BY l.name, u.name`).all()
+        .map((r) => ['******' + String(r.student_id).slice(-4), r.name, r.lab, r.direction, r.source, new Date(r.at).toLocaleString('zh-CN', { hour12: false })])
+    );
+  } else if (type === 'audit') {
+    rows = [['时间', '操作人', '角色', '动作', '详情']].concat(
+      d.prepare('SELECT * FROM audit ORDER BY at DESC').all()
+        .map((r) => [new Date(r.at).toLocaleString('zh-CN', { hour12: false }), r.actor, r.role, r.action, r.detail || ''])
+    );
+  } else {
+    fail(404, '不支持的导出类型');
+  }
+  return { csv: csvOf(rows), filename: type + '-' + csvDate() + '.csv' };
+}
+
+function unlockInterview(d, user, id) {
+  if (user.role !== 'admin') fail(403, '仅学院管理员可解锁评分');
+  const iv = d.prepare('SELECT * FROM interviews WHERE id = ?').get(id);
+  if (!iv) fail(404, '面试记录不存在');
+  if (!iv.locked) fail(400, '该评分未锁定，无需解锁');
+  d.prepare('UPDATE interviews SET locked = 0 WHERE id = ?').run(iv.id);
+  rules.audit(d, user.name, user.role, '解锁评分', '解锁 ' + iv.student_id + ' 在「' + iv.lab_id + '」的面试评分');
+  return { ok: true };
+}
 
 function match(method, pathname) {
   const segs = pathname.split('/').filter(Boolean);

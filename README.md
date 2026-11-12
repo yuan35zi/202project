@@ -94,13 +94,15 @@ data/backups/         备份目录
 | POST | `/api/publicity` | 学院 | 发布 1 天公示 |
 | POST | `/api/objections` | 学生 | 提交异议 |
 | POST | `/api/demo/reset` | 演示环境 | 清库重灌种子数据 |
+| GET | `/api/export/:kind` | 学院 | 导出 CSV（students/labs/admissions/publicity/audit） |
+| POST | `/api/interviews/:id/unlock` | 学院 | 解锁已锁定的面试评分，需重新评分 |
 
 服务端在**每次读写前**自动执行一次结算（幂等），因此「单意向自动确认」「确认窗口结束逾期释放」不依赖前端在线。
 
 ## 数据库
 
 - 引擎：Node 内置 `node:sqlite`，单文件 `data/app.db`，WAL 模式，`busy_timeout=5000`。
-- 结构：`server/migrations/001_init.sql` 定义 16 张表、索引、视图与触发器；启动时按文件名顺序执行，执行记录写入 `schema_migrations`，重复启动不会重复建表。
+- 结构：`server/migrations/` 下按序号执行（`001_init.sql` 建表，`002_nomination_deadline.sql` 增加补位确认截止时间），执行记录写入 `schema_migrations`，重复启动不会重复建表。
 - 约束兜底：`CHECK` 校验角色/状态枚举与 0–100 分数区间；外键全部开启（`PRAGMA foreign_keys=ON`）；部分唯一索引防止同一实训室出现两条有效名单；触发器 `trg_nomination_capacity_insert/update` 在插入拟录取或递补升级时校验名额，超录直接 `RAISE(ABORT,'名额已满')`。
 - 容量视图：`v_lab_capacity` 按「拟录取 ∪ 已确认 ∪ 已调剂」去重统计占用，页面与接口共用同一口径。
 - 旧库兼容：检测到没有 `schema_migrations` 的旧结构时，先 `VACUUM INTO data/legacy-<时间戳>.db` 备份，再重建并灌入演示数据。
@@ -140,8 +142,8 @@ data/backups/         备份目录
 | R6 窗口修改、版本留痕 | `application_versions` 保存每次旧版本 |
 | R7 单意向自动确认 | `rules.settle` |
 | R8 多意向二选一 | `rules.confirmOffer` |
-| R9 逾期释放 | `rules.settle`（stage ≥ 5） |
-| R10 递补补位 | `rules.promote`（确认后释放名额时触发） |
+| R9 逾期释放 | `rules.settle`（窗口结束 + 补位 2 小时到期，两个口径分开处理） |
+| R10 递补补位 | `rules.promote`：确认释放、逾期释放、移除名单后都会自动递补，写入 `nominations.deadline = now + 2h` |
 | R14/R15 三级调剂 | `api.allocate`（P1/P2/P3，理由必填） |
 | R17 幂等/并发 | SQLite 事务 + 主键/唯一约束；重复确认返回 409 |
 | R19 公示脱敏 | 快照中 `publicRows` 仅返回姓名 + 学号后四位 |
@@ -154,9 +156,10 @@ data/backups/         备份目录
 - 双选链路：学生 2 条意向 → 确认 L3 → 另一条 `released` → 再确认返回 409。
 - 前端链路（无头 Chrome）：登录 → 23 条路由全量渲染 → 填报 3 个意向落库 → 跳转双选 → 二选一确认 → 导师评分 78 分锁定 → 学院看板/审计，全程 0 个 JS 报错。
 - 数据持久化：重启服务后数据仍在（SQLite 文件）；重置接口可恢复演示数据。
+- 接口层：`npm run test:api` 31/31 通过（自动拉起临时服务与临时库，覆盖登录、填报、评分锁定与解锁、双选确认、公示、调剂、CSV 导出、登录限流、递补 2 小时截止、重置）。
 - 数据库层：`npm run test:db` 8/8 通过（名额触发器、外键、评分 CHECK、调剂理由 CHECK、部分唯一索引、递补升级触发器、迁移幂等、完整性）。
-- 接口层：`npm run test:api` 24/24 通过（自动拉起临时服务与临时库，覆盖登录、填报、评分锁定、双选确认、公示、调剂、重置）。
 - 界面层：`npm run test:ui` 6/6 通过（无头 Chrome 打开 5 个关键页面，渲染正常且无 JS 报错）。
+- 本机注意：PowerShell 执行策略可能禁用 `npm.ps1`，改跑 `npm.cmd test` 或直接 `node test/api-smoke.js`。
 
 ## 演示数据与深链
 
@@ -173,7 +176,7 @@ http://127.0.0.1:8123/?as=admin#/a/allocate
 ## 上线前还要补的
 
 1. **HTTPS 与反向代理**：Nginx 终止 TLS，`proxy_set_header X-Forwarded-*`，Cookie 加 `Secure`。
-2. **登录限流**：同 IP/账号失败次数限制与锁定（当前无）。
+2. **登录限流**：已做进程内限流（同 IP + 账号 5 次/5 分钟），多实例部署时需换成 Redis 等共享计数。
 3. **审计不可篡改**：当前可删库；正式环境建议日志外送或只读副本。
 4. **备份**：SQLite 定时 `VACUUM INTO` 或文件级快照，保留 ≥30 天。
 5. **并发压测**：截止瞬间 500 并发提交/确认，验证 P95 与零超录。

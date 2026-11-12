@@ -91,48 +91,79 @@ function promotionRank(d, labId) {
   return (row.m || 0) + 1;
 }
 
-/** 递补：有空位就按顺位补 */
+/** 递补：有空位就按顺位补；补位成功后记录个人确认截止时间（补位 + 2h，且不晚于本轮结束） */
 function promote(d, labId) {
   let promoted = 0;
   let guard = 0;
+  const idx = stageIndex(d);
+  const st4 = d.prepare('SELECT end_at AS end FROM stages WHERE idx = 4').get();
   while (remaining(d, labId) > 0 && guard++ < 20) {
     const w = waitlist(d, labId)[0];
     if (!w) break;
-    d.prepare("UPDATE nominations SET type = 'accept', rank = ? WHERE id = ?").run(promotionRank(d, labId), w.id);
+    const deadline = idx >= 4 && st4
+      ? (idx >= 5 ? now() + 2 * 3600e3 : Math.min(st4.end, now() + 2 * 3600e3))
+      : null;
+    d.prepare("UPDATE nominations SET type = 'accept', rank = ?, deadline = ? WHERE id = ?")
+      .run(promotionRank(d, labId), deadline, w.id);
     const stu = d.prepare('SELECT name FROM users WHERE id = ?').get(w.student_id);
     const lab = d.prepare('SELECT name FROM labs WHERE id = ?').get(labId);
-    audit(d, '系统', 'system', '递补补位', '「' + lab.name + '」按顺位递补 ' + (stu ? stu.name : w.student_id));
+    audit(d, '系统', 'system', '递补补位', '「' + lab.name + '」按顺位递补 ' + (stu ? stu.name : w.student_id) +
+      (deadline ? '，须在 ' + new Date(deadline).toLocaleString('zh-CN', { hour12: false }) + ' 前确认' : ''));
     promoted++;
   }
   return promoted;
 }
 
-/** 阶段结算：单意向自动确认；确认窗口结束后逾期释放 */
+/** 释放某学生的全部拟录取意向，并按实训室逐个触发递补 */
+function expireOffers(d, studentId, reason) {
+  const labs = d.prepare("SELECT DISTINCT lab_id FROM nominations WHERE student_id = ? AND type = 'accept' AND status IS NULL")
+    .all(studentId).map((r) => r.lab_id);
+  if (!labs.length) return 0;
+  d.prepare("UPDATE nominations SET status = 'expired' WHERE student_id = ? AND type = 'accept' AND status IS NULL").run(studentId);
+  const stu = d.prepare('SELECT name FROM users WHERE id = ?').get(studentId);
+  audit(d, '系统', 'system', reason, (stu ? stu.name : studentId) + ' 释放 ' + labs.length + ' 个拟录取意向，触发递补');
+  labs.forEach((labId) => promote(d, labId));
+  return labs.length;
+}
+
+/** 阶段结算：单意向自动确认；窗口结束或补位超时则释放并递补（幂等） */
 function settle(d, t) {
-  const idx = stageIndex(d, t);
+  const at = t == null ? now() : t;
+  const idx = stageIndex(d, at);
   if (idx < 4) return 0;
   let changed = 0;
 
-  const unconfirmed = d.prepare(`
-    SELECT n.student_id, COUNT(*) AS cnt, MIN(n.lab_id) AS lab_id
-    FROM nominations n
-    LEFT JOIN confirmations c ON c.student_id = n.student_id
-    WHERE n.type = 'accept' AND n.status IS NULL AND c.student_id IS NULL
-    GROUP BY n.student_id
-  `).all();
+  // 1) 只收到 1 条意向的，进入双选阶段即自动确认
+  d.prepare(`
+    SELECT student_id, MIN(lab_id) AS lab_id FROM nominations
+    WHERE type = 'accept' AND status IS NULL
+      AND student_id NOT IN (SELECT student_id FROM confirmations)
+    GROUP BY student_id HAVING COUNT(*) = 1
+  `).all().forEach((row) => {
+    d.prepare('INSERT INTO confirmations (student_id, lab_id, source, at) VALUES (?,?,?,?)')
+      .run(row.student_id, row.lab_id, 'auto', at);
+    changed++;
+  });
 
-  unconfirmed.forEach((row) => {
-    if (row.cnt === 1) {
-      d.prepare('INSERT INTO confirmations (student_id, lab_id, source, at) VALUES (?,?,?,?)')
-        .run(row.student_id, row.lab_id, 'auto', t || now());
-      changed++;
-    } else if (idx >= 5) {
-      d.prepare("UPDATE nominations SET status = 'expired' WHERE student_id = ? AND type = 'accept' AND status IS NULL")
-        .run(row.student_id);
-      const stu = d.prepare('SELECT name FROM users WHERE id = ?').get(row.student_id);
-      audit(d, '系统', 'system', '逾期放弃', (stu ? stu.name : row.student_id) + ' 未在双选确认窗口内选择，释放 ' + row.cnt + ' 个名额');
-      changed++;
-    }
+  // 2) 多意向学生：补位 2 小时到期；进入补录后仍未确认的老意向按窗口结束释放
+  const rows = d.prepare(idx >= 5
+    ? `
+        SELECT student_id FROM nominations
+        WHERE type = 'accept' AND status IS NULL
+          AND student_id NOT IN (SELECT student_id FROM confirmations)
+        GROUP BY student_id
+        HAVING MIN(deadline) IS NULL OR MIN(deadline) < ?
+      `
+    : `
+        SELECT student_id FROM nominations
+        WHERE type = 'accept' AND status IS NULL
+          AND student_id NOT IN (SELECT student_id FROM confirmations)
+        GROUP BY student_id
+        HAVING MIN(deadline) IS NOT NULL AND MIN(deadline) < ?
+      `).all(at);
+
+  rows.forEach((row) => {
+    changed += expireOffers(d, row.student_id, idx >= 5 ? '逾期放弃' : '补位超时释放');
   });
   return changed;
 }

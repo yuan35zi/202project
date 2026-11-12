@@ -168,7 +168,7 @@
 
     U.usePager(host, 'labs', pager, paint);
     host.querySelector('#q').addEventListener('input', (e) => { q = e.target.value.trim(); pager.page = 1; paint(); });
-    host.querySelector('#exportBtn').addEventListener('click', () => U.toast('导出成功', '名额表已生成（演示版不落盘）', 'ok'));
+    host.querySelector('#exportBtn').addEventListener('click', () => App.Api.download('/api/export/labs').catch((e) => U.toast('导出失败', e.message, 'danger')));
 
     host.addEventListener('click', (e) => {
       const b = e.target.closest('[data-quota]');
@@ -266,7 +266,7 @@
         }
       });
     });
-    host.querySelector('#exportBtn').addEventListener('click', () => U.toast('导出成功', '学生名单已生成（演示版不落盘）', 'ok'));
+    host.querySelector('#exportBtn').addEventListener('click', () => App.Api.download('/api/export/students').catch((e) => U.toast('导出失败', e.message, 'danger')));
 
     host.addEventListener('click', (e) => {
       const b = e.target.closest('[data-detail]');
@@ -432,7 +432,7 @@
       });
     });
 
-    host.querySelector('#exportBtn').addEventListener('click', () => U.toast('导出成功', '录取汇总表已生成（演示版不落盘）', 'ok'));
+    host.querySelector('#exportBtn').addEventListener('click', () => App.Api.download('/api/export/admissions').catch((e) => U.toast('导出失败', e.message, 'danger')));
   };
 
   /* ---------- 调剂池 ---------- */
@@ -635,7 +635,7 @@
       });
     }
     const eb = host.querySelector('#exportBtn');
-    if (eb) eb.addEventListener('click', () => U.toast('导出成功', '公示名单（含脱敏学号）已生成', 'ok'));
+    if (eb) eb.addEventListener('click', () => App.Api.download('/api/export/publicity').catch((e) => U.toast('导出失败', e.message, 'danger')));
   };
 
   /* ---------- 审计日志 ---------- */
@@ -671,7 +671,7 @@
 
     U.usePager(host, 'audit', pager, paint);
     host.querySelector('#q').addEventListener('input', (e) => { q = e.target.value.trim(); pager.page = 1; paint(); });
-    host.querySelector('#exportBtn').addEventListener('click', () => U.toast('导出成功', '审计日志已生成（演示版不落盘）', 'ok'));
+    host.querySelector('#exportBtn').addEventListener('click', () => App.Api.download('/api/export/audit').catch((e) => U.toast('导出失败', e.message, 'danger')));
     paint();
   };
 })();

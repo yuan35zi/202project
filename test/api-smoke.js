@@ -56,7 +56,7 @@ async function waitHealth(timeoutMs) {
 
   try {
     const health = await waitHealth(15000);
-    ok('健康检查：结构版本 v1、完整性 ok', health.ok && health.schema.version === 1 && health.integrity === 'ok', health);
+    ok('健康检查：结构版本 v2、完整性 ok', health.ok && health.schema.version >= 2 && health.integrity === 'ok', health);
 
     ok('错误密码返回 401', (await login('student', '2023040101', 'wrongpass')).status === 401);
 
@@ -126,6 +126,41 @@ async function waitHealth(timeoutMs) {
     ok('调剂理由过短返回 400', short.status === 400, short.json);
     const alloc = await call('POST', '/api/allocations', { studentId: cand.no, labId: room.id, priority: 'P3', reason: '冒烟测试：学院统筹调剂' }, admin.cookie);
     ok('统筹调剂成功', alloc.status === 200, alloc.json);
+
+    const expRes = await fetch(BASE + '/api/export/labs', { headers: { cookie: admin.cookie } });
+    const expText = await expRes.text();
+    ok('学院可导出名额表 CSV', expRes.status === 200 && /text\/csv/.test(expRes.headers.get('content-type')) && expText.indexOf('实训室') >= 0, { status: expRes.status });
+    const exp403 = await call('GET', '/api/export/labs', undefined, stu.cookie);
+    ok('学生导出返回 403', exp403.status === 403, exp403.json);
+
+    const unlock = await call('POST', '/api/interviews/' + pending.id + '/unlock', {}, admin.cookie);
+    ok('学院可解锁已锁定评分', unlock.status === 200, unlock.json);
+    const unlockAgain = await call('POST', '/api/interviews/' + pending.id + '/unlock', {}, admin.cookie);
+    ok('未锁定重复解锁返回 400', unlockAgain.status === 400, unlockAgain.json);
+    const rescore = await call('POST', '/api/interviews/' + pending.id + '/score',
+      { attitude: 88, logic: 88, coding: 88, comm: 88 }, tea.cookie);
+    ok('解锁后可重新评分', rescore.status === 200, rescore.json);
+
+    let lastRate = null;
+    for (let i = 0; i < 6; i++) {
+      lastRate = await call('POST', '/api/login', { role: 'student', id: '2023040102', password: 'wrong-pass' });
+    }
+    ok('连续失败登录触发 429 限流', lastRate.status === 429, lastRate.json);
+
+    const bSnap = (await call('GET', '/api/bootstrap', undefined, admin.cookie)).json.snapshot;
+    const labWithWait = [...new Set(bSnap.nominations.filter((n) => n.type === 'wait' && !n.status).map((n) => n.labId))]
+      .find((id) => bSnap.nominations.some((n) => n.type === 'accept' && n.labId === id && !n.status));
+    let promoOk = false;
+    if (labWithWait) {
+      const accBefore = bSnap.nominations.filter((n) => n.type === 'accept' && n.labId === labWithWait && !n.status);
+      const waitBefore = bSnap.nominations.filter((n) => n.type === 'wait' && n.labId === labWithWait && !n.status);
+      const del = await call('DELETE', '/api/nominations/' + accBefore[0].id, undefined, admin.cookie);
+      const cSnap = del.status === 200 ? (await call('GET', '/api/bootstrap', undefined, admin.cookie)).json.snapshot : bSnap;
+      const promoted = (cSnap.nominations || []).filter((n) =>
+        n.type === 'accept' && n.labId === labWithWait && !n.status && waitBefore.some((w) => w.no === n.no));
+      promoOk = del.status === 200 && promoted.length > 0;
+    }
+    ok('移除拟录取后自动递补', promoOk, { labWithWait });
 
     const reset = await call('POST', '/api/demo/reset', {}, admin.cookie);
     ok('演示数据重置成功', reset.status === 200, reset.json);

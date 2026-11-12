@@ -134,11 +134,26 @@ const server = http.createServer(async (req, res) => {
     };
     if (req.method !== 'GET' && req.method !== 'HEAD') ctx.body = await readBody(req);
     const result = await api.handle(ctx);
+    if (result && typeof result.csv === 'string') {
+      res.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + encodeURIComponent(result.filename) + '"',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      res.end('\uFEFF' + result.csv);
+      return;
+    }
     sendJson(res, 200, result);
   } catch (err) {
-    const status = err.status || 500;
+    let status = err.status || 500;
+    let message = status >= 500 ? '服务器内部错误' : err.message;
+    if (!err.status && err.code && String(err.code).indexOf('SQLITE_CONSTRAINT') === 0) {
+      status = 409;
+      message = '操作冲突：该记录已存在或名额已满，请刷新后重试';
+    }
     if (status >= 500) console.error('[api]', err);
-    sendJson(res, status, { error: status >= 500 ? '服务器内部错误' : err.message });
+    sendJson(res, status, { error: message });
   }
 });
 

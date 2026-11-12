@@ -498,6 +498,12 @@
     const offers = S.myOffers();
     const conf = S.myConfirmation();
     const stage4 = S.get().cycle.stages[4];
+    const myAccepts = S.nominations().filter((n) => n.no === m.id && n.type === 'accept' && !n.status);
+    offers.forEach((o) => {
+      const n = myAccepts.find((x) => x.labId === o.lab.id);
+      o.deadline = n ? n.deadline : null;
+    });
+    const offerDeadline = offers.reduce((min, o) => (o.deadline && (!min || o.deadline < min) ? o.deadline : min), null);
     const expired = S.nominations().filter((n) => n.no === m.id && n.status === 'expired').length;
 
     let inner = '';
@@ -542,7 +548,8 @@
         '<div class="r-row"><span>确认时间</span><b>' + (conf ? U.fmt(conf.at) : '—') + '</b></div></div></div>';
     } else {
       inner =
-        '<div class="alert brand"><span class="ico">✦</span><div><b>你收到 ' + offers.length + ' 个拟录取意向</b>，请在 <b>' + U.fmt(stage4.end) + '</b> 前选择唯一去向。' +
+        '<div class="alert brand"><span class="ico">✦</span><div><b>你收到 ' + offers.length + ' 个拟录取意向</b>，请在 <b>' + U.fmt(offerDeadline || stage4.end) + '</b> 前选择唯一去向。' +
+        (offerDeadline ? '其中含补位意向：补位成功后须在 2 小时内确认。' : '') +
         '选择后其余意向将立即释放给递补学生，且不可撤销。倒计时：<b><span data-cd="clock">' + U.durClock(S.countdown().ms) + '</span></b></div></div>' +
         '<div class="grid grid-side mt-16"><div>' +
           '<div class="offer-list" id="offers">' +
@@ -550,7 +557,8 @@
               '<span class="radio"></span>' +
               '<div class="o-body"><h4>' + U.esc(o.lab.name) + '</h4>' +
               '<p class="o-sub">' + U.esc(o.lab.direction) + '</p>' +
-              '<div class="o-meta"><span>导师 ' + U.esc(o.lab.teacher.name) + '</span><span>名额 ' + o.lab.quota + ' 人</span><span>' + U.esc(o.lab.room) + '</span></div></div>' +
+              '<div class="o-meta"><span>导师 ' + U.esc(o.lab.teacher.name) + '</span><span>名额 ' + o.lab.quota + ' 人</span><span>' + U.esc(o.lab.room) + '</span></div>' +
+              (o.deadline ? '<p class="tiny" style="color:var(--warn);margin-top:6px">补位确认截止 ' + U.fmt(o.deadline) + '</p>' : '') + '</div>' +
               '<span class="badge ok">拟录取</span></div>').join('') +
           '</div>' +
           '<p class="tiny muted mt-12">三个意向地位平等，系统不记录你的选择先后；同一实训室可能同时向多名学生发出意向。</p>' +
