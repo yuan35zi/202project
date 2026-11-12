@@ -1,0 +1,20 @@
+{
+  "name": "lab-selection-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "实训室进组选拔系统：学生填报 / 导师面试 / 双选确认 / 补录调剂 / 公示",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "db:check": "node scripts/db-check.js",
+    "db:reset": "node scripts/db-reset.js",
+    "db:reset:hard": "node scripts/db-reset.js --hard",
+    "db:backup": "node scripts/db-backup.js",
+    "test": "node test/db-constraints.js && node test/api-smoke.js && node test/ui-smoke.js",
+    "test:db": "node test/db-constraints.js",
+    "test:api": "node test/api-smoke.js",
+    "test:ui": "node test/ui-smoke.js"
+  }
+}

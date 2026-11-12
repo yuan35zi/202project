@@ -1,0 +1,12 @@
+node_modules/
+
+# 运行期数据库（首次启动会自动生成）
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/
+data/legacy-*.db
+
+# 系统文件
+.DS_Store
+Thumbs.db
